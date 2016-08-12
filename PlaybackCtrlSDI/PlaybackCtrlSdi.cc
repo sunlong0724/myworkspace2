@@ -18,7 +18,18 @@
 
 int32_t	decklink_device_sink_cb(char* buffer, int32_t len, void* ctx) {
 	CPlaybackCtrlSdi* p = (CPlaybackCtrlSdi*)ctx;
-	return p->write_yuv_data(buffer, len);
+	int ret = 0;
+
+	if (p->m_store_file_flag) {
+		ret = p->write_yuv_data(buffer, len);
+	}
+
+	if (CPlaybackCtrlSdi::Pb_STATUS_LIVE == p->m_status) {
+		if (p->m_cb_have_data) {
+			p->m_cb_have_data((unsigned char*)buffer, len, p->m_cb_have_data_ctx);
+		}
+	}
+	return ret;
 }
 
 
@@ -29,33 +40,97 @@ int32_t encoder_read_next_frame(unsigned char* buffer, int32_t len, void* ctx) {
 
 int32_t encoder_write_next_frame(unsigned char* buffer, int32_t len, void* ctx) {
 	CPlaybackCtrlSdi* p = (CPlaybackCtrlSdi*)ctx;
-	int32_t nbyte_written = 0;
-	if (p->m_store_file_flag && p->m_fp) {
-		p->m_frame_offset_map.insert(std::make_pair(p->m_frame_counter, p->m_written_bytes));
-		nbyte_written = fwrite(buffer, 1, len, p->m_fp);
+
+	int64_t nBytesWritten = 0;
+	//timestamp(int64_t) frame_no(int64_t) buffer
+	int64_t timestamp = get_current_time_in_ms();
+	++p->m_frame_counter;
+
+	if (p->m_fp_writter) {
+		nBytesWritten = fwrite(buffer, 1, len, p->m_fp_writter);
+		std::vector<int64_t> v{ p->m_bytes_written, nBytesWritten };
+		p->m_frame_offset_map.insert(std::make_pair(p->m_frame_counter, v));
 	}
 
-	//check the data whether need!!!
-	if (p->m_play_frame_gap != 0 && p->m_last_live_play_seq + p->m_play_frame_gap != p->m_frame_counter) {
-		return nbyte_written;
-	}
-	//fprintf(stdout, "####m_last_live_play_seq %d, m_frame_counter %d, m_play_frame_gap %d\n", p->m_last_live_play_seq, p->m_frame_counter, p->m_play_frame_gap);
-
-	if (p->m_live_frame_flag) {
-		if (p->m_cb_have_data) {
-			p->m_cb_have_data(buffer, len, p->m_cb_have_data_ctx);
-		}
-	}
-	return nbyte_written;
+	p->m_bytes_written += nBytesWritten;
+	return nBytesWritten;
 }
 
+
+int32_t decoder_read_next_frame(unsigned char* buffer, int32_t len, void* ctx) {
+	CPlaybackCtrlSdi* p = (CPlaybackCtrlSdi*)ctx;
+	if (CPlaybackCtrlSdi::Pb_STATUS_FORWARD == p->m_status || CPlaybackCtrlSdi::Pb_STATUS_BACKWARD == p->m_status) {
+		if (p->m_frame_offset_map.find(p->m_playback_frame_seq_find) == p->m_frame_offset_map.end()) {//The frame was overwritten!!!
+			--p->m_playback_frame_seq_find;
+																			//fprintf(stderr, "Frame %lld was not found!!!\n", frame_no);
+			fprintf(stdout, "%s map size(%lld),beg(seq:%lld,offset:%lld),end(seq:%lld,offset:%lld),Frame %lld was not found\n", __FUNCTION__, \
+				p->m_frame_offset_map.size(), p->m_frame_offset_map.begin()->first, p->m_frame_offset_map.begin()->second,
+				p->m_frame_offset_map.rbegin()->first, p->m_frame_offset_map.rbegin()->second, p->m_playback_frame_seq_find);
+			return -2;
+		}
+		else {
+			int64_t	frame_offset = p->m_frame_offset_map[p->m_playback_frame_seq_find][0];//The frame was lost!!!
+			int64_t	data_len = p->m_frame_offset_map[p->m_playback_frame_seq_find][1];//The frame was lost!!!
+			if (frame_offset < 0) {//this frame is lost!!!
+				return 0;
+			}
+			//fprintf(stdout, "%s frame_no:%lld, frame_offset:%lld\n", __FUNCTION__,frame_no, frame_offset);
+			LARGE_INTEGER offset;
+			offset.QuadPart = frame_offset;
+			SetFilePointerEx(p->m_fp_reader, offset, NULL, FILE_BEGIN);
+			int nBytesRead = fread(buffer, 1, data_len, p->m_fp_reader);
+			if (data_len == nBytesRead) {
+				fprintf(stdout, "fread failed, !!!\n");
+			}
+			p->m_playback_frame_seq_find -= p->f;
+		}
+	}
+	else if (CPlaybackCtrlSdi::Pb_STATUS_FROM_A2B_LOOP == p->m_status) {
+
+		if (p->m_frame_offset_map.find(p->m_playback_frame_seq_find) == p->m_frame_offset_map.end()) {//The frame was overwritten!!!
+			--p->m_playback_frame_seq_find;
+			//fprintf(stderr, "Frame %lld was not found!!!\n", frame_no);
+			fprintf(stdout, "%s map size(%lld),beg(seq:%lld,offset:%lld),end(seq:%lld,offset:%lld),Frame %lld was not found\n", __FUNCTION__, \
+				p->m_frame_offset_map.size(), p->m_frame_offset_map.begin()->first, p->m_frame_offset_map.begin()->second,
+				p->m_frame_offset_map.rbegin()->first, p->m_frame_offset_map.rbegin()->second, p->m_playback_frame_seq_find);
+			return -2;
+		}
+		else {
+			int64_t	frame_offset = p->m_frame_offset_map[p->m_playback_frame_seq_find][0];//The frame was lost!!!
+			int64_t	data_len = p->m_frame_offset_map[p->m_playback_frame_seq_find][1];//The frame was lost!!!
+			if (frame_offset < 0) {//this frame is lost!!!
+				return 0;
+			}
+			//fprintf(stdout, "%s frame_no:%lld, frame_offset:%lld\n", __FUNCTION__,frame_no, frame_offset);
+			LARGE_INTEGER offset;
+			offset.QuadPart = frame_offset;
+			SetFilePointerEx(p->m_fp_reader, offset, NULL, FILE_BEGIN);
+			int nBytesRead = fread(buffer, 1, data_len, p->m_fp_reader);
+			if (data_len == nBytesRead) {
+				fprintf(stdout, "fread failed, !!!\n");
+			}
+			--p->m_playback_frame_seq_find;
+		}
+	}
+}
+
+int32_t decoder_write_next_frame(unsigned char* buffer, int32_t len, void* ctx) {
+	CPlaybackCtrlSdi* p = (CPlaybackCtrlSdi*)ctx;
+
+	if (p->m_cb_have_data) {
+		p->m_cb_have_data((unsigned char*)buffer, len, p->m_cb_have_data_ctx);
+	}
+	return len;
+}
+
+
+
+
 CPlaybackCtrlSdi::CPlaybackCtrlSdi() :m_store_file_flag(false), m_status(Pb_STATUS_NONE), m_last_status(Pb_STATUS_NONE), m_image_w(MAX_IMAGE_WIDTH), \
-m_image_h(MAX_IMAGE_HEIGHT), m_frame_counter(0), m_fp(NULL), m_playback_frame_no(0), m_cb_have_data(NULL), m_cb_have_data_ctx(NULL), m_last_live_play_seq(0), m_play_frame_gap(0), m_live_frame_flag(false){
+m_image_h(MAX_IMAGE_HEIGHT), m_frame_counter(0), m_playback_frame_seq_find(0), m_cb_have_data(NULL), m_cb_have_data_ctx(NULL), m_last_live_play_seq(0), m_play_frame_gap(0), m_live_frame_flag(false) {
 	m_decklink_input_obj = new CDeckLinkInputDevice;
 	m_encoder_thread = new CEncodeThread;
-
 	//m_ring_buffer_for_yuv = RingBuffer_create(GET_IMAGE_BUFFER_SIZE(m_image_w, m_image_h));
-
 }
 CPlaybackCtrlSdi::~CPlaybackCtrlSdi() {
 	delete m_encoder_thread;
@@ -69,7 +144,7 @@ bool CPlaybackCtrlSdi::start(int sdi_index) {
 	parameter.append(" -b 30000 -f ");
 	parameter.append(std::to_string(MAX_FPS) + "/1 -gop 1");
 
-	((CEncodeThread*)m_encoder_thread)->init( parameter.c_str());
+	((CEncodeThread*)m_encoder_thread)->init(parameter.c_str());
 	((CEncodeThread*)m_encoder_thread)->start(std::bind(&encoder_read_next_frame, std::placeholders::_1, std::placeholders::_2, this), std::bind(&encoder_write_next_frame, std::placeholders::_1, std::placeholders::_2, this));
 
 	if (false == ((CDeckLinkInputDevice*)m_decklink_input_obj)->CreateObjects(sdi_index)) {
@@ -117,16 +192,24 @@ int32_t CPlaybackCtrlSdi::set_play_frame_rate(const int32_t play_frame_rate, con
 	return 1;
 }
 int32_t CPlaybackCtrlSdi::set_store_file(const int32_t flag, char* file_name) {
-	if (file_name) {
-		strcpy(m_file_name, file_name);
-		if (NULL == m_fp) {
-			m_fp = fopen(m_file_name, "wb");
+	if (file_name != NULL) {
+		if (m_fp_writter == NULL) {
+			m_fp_writter = fopen(file_name, "wb");
 		}
-		if (NULL == m_fp) {
-			fprintf(stderr, "%s fopen failed!!!\n", __FUNCTION__);
+		if (m_fp_writter == NULL){
+			fprintf(stdout, "%s fopen %s failed!\n", __FUNCTION__, file_name);
+			return -1;
+		}
+
+		if (m_fp_reader == NULL) {
+			m_fp_reader = fopen(file_name, "wb");
+		}
+		if (m_fp_reader == NULL) {
+			fprintf(stdout, "%s fopen %s failed!\n", __FUNCTION__, file_name);
 			return -1;
 		}
 	}
+
 	return m_store_file_flag = flag;
 }
 
@@ -172,10 +255,7 @@ void CPlaybackCtrlSdi::run() {
 			continue;
 		}
 		else if (Pb_STATUS_FORWARD == m_status || Pb_STATUS_BACKWARD == m_status) {
-		
-		}
-		else if (Pb_STATUS_LIVE == m_status) {
-
+			
 		}
 		else if (Pb_STATUS_FROM_A2B_LOOP == m_status) {
 

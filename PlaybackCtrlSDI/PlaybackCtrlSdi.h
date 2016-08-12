@@ -45,24 +45,31 @@ protected:
 	void run();
 
 public:
+
 	std::map<int64_t, int64_t>  m_frame_offset_map;
 	int64_t				m_frame_counter;
-	int64_t				m_written_bytes;
 	bool				m_store_file_flag;
-	FILE*				m_fp;
-	int64_t				m_playback_frame_no;
 	int64_t				m_play_frame_gap;
 	int64_t				m_last_live_play_seq;
 	on_have_data_cb		m_cb_have_data;
 	void*				m_cb_have_data_ctx;
 	bool				m_live_frame_flag;
 
-private:
+
 	void*				m_decklink_input_obj; //CDeckLinkInputDevice*
 	void*				m_encoder_thread;     //CEncodeThread*  //don't need write thread temporarily
-	//void*				m_file_writer_thread;
+	void*				m_file_storage_thread_for_write;
 
+	Playback_Status		m_status;
+	Playback_Status		m_last_status;
 
+	FILE*				m_fp_writter;
+	FILE*				m_fp_reader;
+	std::map<int64_t, std::vector<int64_t>> m_frame_offset_map;
+	int64_t				m_bytes_written;
+	int64_t				m_playback_frame_seq_find;
+
+private:
 
 	int32_t				m_image_w;
 	int32_t				m_image_h;
@@ -75,11 +82,11 @@ private:
 
 
 
-	Playback_Status		m_status;
-	Playback_Status		m_last_status;
 
-	void*				m_ring_buffer_for_yuv;
+
 	char				m_file_name[1024];
+	void*				m_ring_buffer_for_yuv;
+	
 };
 
 #endif // !__PLAYBACK_CTRL_SDI_H__

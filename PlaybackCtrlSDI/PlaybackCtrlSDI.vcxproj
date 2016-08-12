@@ -151,7 +151,6 @@
     <ClCompile Include="DeckLinkAPI_i.c" />
     <ClCompile Include="DeckLinkInputDevice.cpp" />
     <ClCompile Include="DeckLinkOutputDevice.cpp" />
-    <ClCompile Include="FileStorage.cc" />
     <ClCompile Include="main.cc" />
     <ClCompile Include="PlaybackCtrlSdi.cc" />
   </ItemGroup>
@@ -165,7 +164,6 @@
     <ClInclude Include="..\std\MyThread.h" />
     <ClInclude Include="..\std\utils.h" />
     <ClInclude Include="DeckLinkIODevice.h" />
-    <ClInclude Include="FileStorage.h" />
     <ClInclude Include="msdk_codec.h" />
     <ClInclude Include="PlaybackCtrlSdi.h" />
   </ItemGroup>

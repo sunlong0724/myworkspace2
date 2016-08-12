@@ -31,7 +31,7 @@ public:
 	static std::string			m_file_name;
 	static long long			m_max_file_size;
 
-	RingBuffer					*m_written_queue;
+	std::deque<std::vector<char>> m_h264_buffers;
 	CFPSCounter					m_fps_counter;
 };
 

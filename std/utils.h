@@ -11,6 +11,7 @@ extern "C" {
 #include <map>
 #include <chrono>
 #include <thread>
+#include <deque>
 
 #include <Windows.h>
 

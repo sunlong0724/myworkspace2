@@ -30,10 +30,7 @@ int64_t CFileStorage::write_file(char* buffer, int64_t buffer_len) {
 		ret = 0;
 	}
 	else {
-		ret = RingBuffer_write(m_written_queue, buffer, buffer_len);
-		if (-1 == ret) {
-			fprintf(stdout, "%s RingBuffer full,insert a fake frame %d\n", __FUNCTION__, frame_counter);
-		}
+		m_h264_buffers.push_back(std::vector<char>(buffer, buffer + buffer_len));
 		m_frame_offset_map.insert(std::make_pair(frame_counter, -2));
 	}
 
@@ -47,9 +44,6 @@ int64_t CFileStorage::write_file(char* buffer, int64_t buffer_len) {
 
 
 void CFileStorage::run() {
-	m_written_queue = RingBuffer_create(GET_IMAGE_BUFFER_SIZE(g_cs.m_image_w, g_cs.m_image_h) * MAX_FPS * MAX_CACHE_IMAGE_TIME);
-	std::vector<char> m_swap_buffer(GET_IMAGE_BUFFER_SIZE(g_cs.m_image_w, g_cs.m_image_h), 0x00);
-
 	DWORD dw = 0;
 	if (m_writter_handle == NULL || m_writter_handle == INVALID_HANDLE_VALUE) {
 		//check sector size
@@ -61,18 +55,22 @@ void CFileStorage::run() {
 		}
 	}
 
+	m_h264_buffers.resize(MAX_FPS * 10)
+
 	while (!m_exited) {
-		if (-1 == RingBuffer_read(m_written_queue, m_swap_buffer.data(), m_swap_buffer.size())) {
-			sleep(1);
+	
+		if (m_h264_buffers.size() <= 0) {
+			sleep(2);
 			continue;
 		}
-		int ret = do_write_file(m_swap_buffer.data(), m_swap_buffer.size());
-		if (m_swap_buffer.size() != ret) {
+
+		auto& the_buffer = m_h264_buffers.front();
+		int ret = do_write_file(the_buffer.data(),the_buffer.size());
+		if (the_buffer.size() != ret) {
 			fprintf(stdout, "%s do_write_file failed! ret %d\n", __FUNCTION__, ret);
 		}
+		m_h264_buffers.pop_front();
 	}
-
-	RingBuffer_destroy(m_written_queue);
 }
 
 //timestamp(int64_t) frame_no(int64_t) buffer
