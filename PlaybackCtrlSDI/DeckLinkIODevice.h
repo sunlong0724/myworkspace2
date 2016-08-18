@@ -5,7 +5,7 @@
 #define MAX_DEVICES_COUNT 8
 typedef int(*SourceDataCallback)(char*, int, void*);
 typedef int(*SinkDataCallback)(char*, int, void*);
-typedef int(*PixelFormatChangedCallback)(int, char*, void*);
+typedef int(*FormatChangedCallback)(int, int, double, void*);//width height frame_rate
 
 class CDeckLinkInputDevice {
 public:
@@ -14,7 +14,7 @@ public:
 	bool CreateObjects(int k);
 	void DestroyObjects();
 	void setSinkDataCallback(SinkDataCallback cb, void* ctx);
-	void setVideoInputFormatChangedCallback(PixelFormatChangedCallback cb, void* ctx);
+	void setVideoInputFormatChangedCallback(FormatChangedCallback cb, void* ctx);
 
 	bool start_capture();
 	bool stop_capture();
@@ -34,7 +34,7 @@ class CDeckLinkOutputDevice {
 public:
 	CDeckLinkOutputDevice();
 
-	bool CreateObjects(int k);
+	bool CreateObjects(int k, int width, int height, int rate);
 	void DestroyObjects();
 	void setSourceCallback(SourceDataCallback cb, void* ctx);
 	//void setVideoInputFormatChangedCallback(PixelFormatChangedCallback cb, void* ctx);
@@ -71,6 +71,10 @@ public:
 
 	long long            frameDuration;//BMDTimeValue
 	long long            timeScale;//BMDTimeScale
+
+	int					m_width;
+	int					m_height;
+	int					m_frame_rate;
 };
 
 

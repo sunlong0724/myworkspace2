@@ -1,155 +1,347 @@
 #include "PlaybackCtrlSdi.h"
 
 #include "DeckLinkIODevice.h"
-#include "msdk_codec.h"
+//#include "msdk_codec.h"
 #include "utils.h"
+#include "FPSCounter.h"
 
 #include <functional>
 
 
 #pragma comment(lib, "Winmm.lib")
-#ifdef _DEBUG         
-#pragma comment(lib, "msdk_codecd.lib")
-#else 
-#pragma comment(lib, "msdk_codec.lib")
-#endif
+//#ifdef _DEBUG         
+//#pragma comment(lib, "ffmpeg_h264codecd.lib")
+//#else 
+//#pragma comment(lib, "ffmpeg_h264codec.lib")
+//#endif
+#pragma comment(lib, "swscale.lib")
+#pragma comment(lib, "avutil.lib")
+#pragma comment(lib, "avformat.lib")
+#pragma comment(lib, "avcodec.lib")
+
+extern "C" {
+	#include "libswscale/swscale.h"
+	#include "libavutil/avutil.h"
+	#include "libavutil/imgutils.h"
+	#include "libavutil/frame.h"
+}
+
+#include "ffmpeg_h264enc.h"
+
+__int64 CPlaybackCtrlSdi::m_max_file_size = ONE_GB * 50i64;
 
 #if 1
 
 int32_t	decklink_device_sink_cb(char* buffer, int32_t len, void* ctx) {
 	CPlaybackCtrlSdi* p = (CPlaybackCtrlSdi*)ctx;
-	int ret = 0;
+	int ret = len;
 
-	if (p->m_store_file_flag) {
+	((CFPSCounter*)p->m_grab_fps_counter)->statistics(__FUNCTION__, TRUE);
+	if (p->m_type == 1) {
 		ret = p->write_yuv_data(buffer, len);
+		//fprintf(stdout, "%s write_yuv_data ret %d\n", __FUNCTION__, ret);
+		return ret;
 	}
+	else {
+		int64_t timestamp = get_current_time_in_ms();
+		if (p->m_resized_flag) {
+			if (NULL == p->m_resized_yuy2_buffer) {
+				p->m_resized_yuy2_buffer_len = p->m_play_frame_w* p->m_play_frame_h *  2 + FRAME_DATA_START;//FIXME:
+				p->m_resized_yuy2_buffer = new char[p->m_resized_yuy2_buffer_len];
+			}
 
-	if (CPlaybackCtrlSdi::Pb_STATUS_LIVE == p->m_status) {
-		if (p->m_cb_have_data) {
-			p->m_cb_have_data((unsigned char*)buffer, len, p->m_cb_have_data_ctx);
+			if (NULL == p->m_scale_ctx_for_resized) {
+				p->m_scale_ctx_for_resized = sws_getContext(p->m_image_w, p->m_image_h, AV_PIX_FMT_UYVY422, p->m_play_frame_w, p->m_play_frame_h, AV_PIX_FMT_YUYV422, SWS_BILINEAR, 0, 0, 0);
+			}
+
+
+			//AVFrame yuv_frame, resized_yuv_frame;
+			av_image_fill_arrays(((AVFrame*)p->m_yuv422_frame)->data, ((AVFrame*)p->m_yuv422_frame)->linesize, (const uint8_t*)buffer, AV_PIX_FMT_UYVY422, p->m_image_w, p->m_image_h, 16);
+			av_image_fill_arrays(((AVFrame*)p->m_resized_yuv_frame)->data, ((AVFrame*)p->m_resized_yuv_frame)->linesize, (const uint8_t*)(&p->m_resized_yuy2_buffer[FRAME_DATA_START]), AV_PIX_FMT_YUYV422, p->m_play_frame_w, p->m_play_frame_h, 16);
+
+			int ret = sws_scale((SwsContext*)p->m_scale_ctx_for_resized, ((AVFrame*)p->m_yuv422_frame)->data, ((AVFrame*)p->m_yuv422_frame)->linesize, 0, p->m_image_h, ((AVFrame*)p->m_resized_yuv_frame)->data, ((AVFrame*)p->m_resized_yuv_frame)->linesize);
+			if (ret != p->m_play_frame_h) {
+				fprintf(stderr, "%s sws_scale failed!\n", __FUNCTION__);
+			}
+
+			memcpy(&p->m_resized_yuy2_buffer[FRAME_TIMESTAMP_START], &timestamp, sizeof timestamp);
+			memcpy(&p->m_resized_yuy2_buffer[FRAME_SEQ_START], &p->m_last_decode_seq, sizeof p->m_last_decode_seq);
+
+			if (p->m_cb_have_data) {
+				p->m_cb_have_data((unsigned char*)p->m_resized_yuy2_buffer, p->m_resized_yuy2_buffer_len, p->m_cb_have_data_ctx);
+			}
+			return p->m_resized_yuy2_buffer_len;
 		}
+
+		//AVFrame yuv422_frame, yuv420_frame;
+		av_image_fill_arrays(((AVFrame*)p->m_yuv422_frame)->data, ((AVFrame*)p->m_yuv422_frame)->linesize, (const uint8_t*)buffer, AV_PIX_FMT_UYVY422, p->m_image_w, p->m_image_h, 16);
+		av_image_fill_arrays(((AVFrame*)p->m_output_yuy2_frame)->data, ((AVFrame*)p->m_output_yuy2_frame)->linesize, (const uint8_t*)(&p->m_out_yuy2_buffer[FRAME_DATA_START]), AV_PIX_FMT_YVYU422, p->m_image_w, p->m_image_h, 16);
+
+		int ret = sws_scale((SwsContext*)p->m_scale_ctx_uyvy422_to_yuy2, ((AVFrame*)p->m_yuv422_frame)->data, ((AVFrame*)p->m_yuv422_frame)->linesize, 0, p->m_image_h, ((AVFrame*)p->m_output_yuy2_frame)->data, ((AVFrame*)p->m_output_yuy2_frame)->linesize);
+		if (ret != p->m_image_h) {
+			fprintf(stderr, "yuv422 to yuv420p falied ret %d\n", ret);
+			return 0;
+		}
+
+		memcpy(&p->m_out_yuy2_buffer[FRAME_TIMESTAMP_START], &timestamp, sizeof timestamp);
+		memcpy(&p->m_out_yuy2_buffer[FRAME_SEQ_START], &p->m_last_decode_seq, sizeof p->m_last_decode_seq);
+
+		if (p->m_cb_have_data) {
+			p->m_cb_have_data((unsigned char*)(p->m_out_yuy2_buffer), p->m_out_yuy2_buffer_len, p->m_cb_have_data_ctx);
+		}
+		return p->m_out_yuy2_buffer_len;
 	}
-	return ret;
 }
 
 
-int32_t encoder_read_next_frame(unsigned char* buffer, int32_t len, void* ctx) {
+int32_t encoder_read_next_frame(int8_t* buffer, int32_t len, void* ctx) {
 	CPlaybackCtrlSdi* p = (CPlaybackCtrlSdi*)ctx;
-	return p->read_yuv_data((char*)buffer, len);
+	//fprintf(stderr, "%s %d!\n", __FUNCTION__, len);
+	if (-1 == p->read_yuv_data((char*)p->m_uyvy422_buffer, p->m_uyvy422_buffer_len)) {
+		return 0;
+	}
+
+	//scale
+	//AVFrame yuv422_frame, yuv420_frame;
+	av_image_fill_arrays( ((AVFrame*)p->m_yuv422_frame)->data, ((AVFrame*)p->m_yuv422_frame)->linesize, (const uint8_t*)p->m_uyvy422_buffer, AV_PIX_FMT_UYVY422, p->m_image_w, p->m_image_h, 16);
+	av_image_fill_arrays( ((AVFrame*)p->m_yuv420_frame)->data, ((AVFrame*)p->m_yuv420_frame)->linesize, (const uint8_t*)p->m_yuv420p_buffer, AV_PIX_FMT_YUV420P, p->m_image_w, p->m_image_h, 16);
+
+	int ret = sws_scale((SwsContext*)p->m_scale_ctx_uyvy422_to_yuv420p, ((AVFrame*)p->m_yuv422_frame)->data, ((AVFrame*)p->m_yuv422_frame)->linesize, 0, p->m_image_h, ((AVFrame*)p->m_yuv420_frame)->data, ((AVFrame*)p->m_yuv420_frame)->linesize);
+	if (ret != p->m_image_h) {
+		fprintf(stderr, "yuv422 to yuv420p falied ret %d\n", ret);
+		return 0;
+	}
+
+	memcpy(buffer, p->m_yuv420p_buffer, p->m_yuv420p_buffer_len);//needed???
+	return p->m_yuv420p_buffer_len;
 }
 
-int32_t encoder_write_next_frame(unsigned char* buffer, int32_t len, void* ctx) {
+char g_h264_name[1024]= "out.264";
+FILE*	g_fp = NULL;
+int32_t encoder_write_next_frame(int8_t* buffer, int32_t len, void* ctx) {
 	CPlaybackCtrlSdi* p = (CPlaybackCtrlSdi*)ctx;
+
+	//if (len < 50 * 1024) {//FIXME:
+	//	fprintf(stderr, "%s %d\n", __FUNCTION__, len);
+	//	return len;
+	//}
+
+	//fprintf(stderr, "%s len %d\n", __FUNCTION__, len);
+	//FILE* fp = fopen(g_h264_name, "ab+");
+	//if (fp) {
+	//	fwrite(buffer, 1, len, fp);
+	//	fclose(fp);
+	//}
 
 	int64_t nBytesWritten = 0;
 	//timestamp(int64_t) frame_no(int64_t) buffer
 	int64_t timestamp = get_current_time_in_ms();
-	++p->m_frame_counter;
+	++p->m_frame_counter; 
+
+	memcpy(&p->m_io_buffer[FRAME_TIMESTAMP_START], &timestamp, sizeof int64_t);
+	memcpy(&p->m_io_buffer[FRAME_SEQ_START], &p->m_frame_counter, sizeof int64_t);
+
+	int64_t l = len;
+	memcpy(&p->m_io_buffer[H264_FRAME_DATA_LENGTH_START], &l, sizeof int64_t);
+	memcpy(&p->m_io_buffer[H264_FRAME_DATA_START], buffer, len);
+
 
 	if (p->m_fp_writter) {
-		nBytesWritten = fwrite(buffer, 1, len, p->m_fp_writter);
-		std::vector<int64_t> v{ p->m_bytes_written, nBytesWritten };
-		p->m_frame_offset_map.insert(std::make_pair(p->m_frame_counter, v));
+		nBytesWritten = fwrite(p->m_io_buffer, 1, p->m_io_buffer_len, p->m_fp_writter);
+		p->m_frame_offset_map.insert(std::make_pair(p->m_frame_counter, p->m_bytes_written));
+
+		p->m_bytes_written += nBytesWritten;
+
+		((CFPSCounter*)p->m_write_file_fps_counter)->statistics(__FUNCTION__, TRUE);
+
+		if (p->m_bytes_written >= p->m_max_file_size) {//FIXME: maybe has a bug
+			fprintf(stdout, "%s max_file_size %lld\n", __FUNCTION__, p->m_max_file_size);
+			p->m_has_reach_max_file_size = true;
+			_fseeki64(p->m_fp_writter, 0, SEEK_SET);
+			p->m_bytes_written = 0;
+		}
 	}
 
-	p->m_bytes_written += nBytesWritten;
+	if (p->m_has_reach_max_file_size && p->m_frame_offset_map.size() > 0) {
+		//fprintf(stdout, "%s delete %d\n", __FUNCTION__, m_frame_offset_map.begin()->first);
+		p->m_frame_offset_map.erase(p->m_frame_offset_map.begin());
+	}
+
+
+	//check the data whether need!!!
+	if (p->m_play_frame_gap != 0 && p->m_last_live_play_seq + p->m_play_frame_gap != p->m_frame_counter) {
+		return nBytesWritten;
+	}
+	//fprintf(stdout, "####m_last_live_play_seq %d, m_frame_counter %d, m_play_frame_gap %d\n", p->m_last_live_play_seq, p->m_frame_counter, p->m_play_frame_gap);
+	if (p->m_live_frame_flag) {
+		RingBuffer_write((RingBuffer*)p->m_ring_buffer_for_ctrl, p->m_io_buffer, p->m_io_buffer_len);
+		p->m_last_live_play_seq += p->m_play_frame_gap;
+	}
 	return nBytesWritten;
 }
 
 
-int32_t decoder_read_next_frame(unsigned char* buffer, int32_t len, void* ctx) {
+int32_t decoder_read_next_frame(int8_t* buffer, int32_t len, void* ctx) {
 	CPlaybackCtrlSdi* p = (CPlaybackCtrlSdi*)ctx;
-	if (CPlaybackCtrlSdi::Pb_STATUS_FORWARD == p->m_status || CPlaybackCtrlSdi::Pb_STATUS_BACKWARD == p->m_status) {
-		if (p->m_frame_offset_map.find(p->m_playback_frame_seq_find) == p->m_frame_offset_map.end()) {//The frame was overwritten!!!
-			--p->m_playback_frame_seq_find;
-																			//fprintf(stderr, "Frame %lld was not found!!!\n", frame_no);
-			fprintf(stdout, "%s map size(%lld),beg(seq:%lld,offset:%lld),end(seq:%lld,offset:%lld),Frame %lld was not found\n", __FUNCTION__, \
-				p->m_frame_offset_map.size(), p->m_frame_offset_map.begin()->first, p->m_frame_offset_map.begin()->second,
-				p->m_frame_offset_map.rbegin()->first, p->m_frame_offset_map.rbegin()->second, p->m_playback_frame_seq_find);
-			return -2;
-		}
-		else {
-			int64_t	frame_offset = p->m_frame_offset_map[p->m_playback_frame_seq_find][0];//The frame was lost!!!
-			int64_t	data_len = p->m_frame_offset_map[p->m_playback_frame_seq_find][1];//The frame was lost!!!
-			if (frame_offset < 0) {//this frame is lost!!!
-				return 0;
-			}
-			//fprintf(stdout, "%s frame_no:%lld, frame_offset:%lld\n", __FUNCTION__,frame_no, frame_offset);
-			LARGE_INTEGER offset;
-			offset.QuadPart = frame_offset;
-			SetFilePointerEx(p->m_fp_reader, offset, NULL, FILE_BEGIN);
-			int nBytesRead = fread(buffer, 1, data_len, p->m_fp_reader);
-			if (data_len == nBytesRead) {
-				fprintf(stdout, "fread failed, !!!\n");
-			}
-			p->m_playback_frame_seq_find -= p->f;
-		}
-	}
-	else if (CPlaybackCtrlSdi::Pb_STATUS_FROM_A2B_LOOP == p->m_status) {
 
-		if (p->m_frame_offset_map.find(p->m_playback_frame_seq_find) == p->m_frame_offset_map.end()) {//The frame was overwritten!!!
-			--p->m_playback_frame_seq_find;
-			//fprintf(stderr, "Frame %lld was not found!!!\n", frame_no);
-			fprintf(stdout, "%s map size(%lld),beg(seq:%lld,offset:%lld),end(seq:%lld,offset:%lld),Frame %lld was not found\n", __FUNCTION__, \
-				p->m_frame_offset_map.size(), p->m_frame_offset_map.begin()->first, p->m_frame_offset_map.begin()->second,
-				p->m_frame_offset_map.rbegin()->first, p->m_frame_offset_map.rbegin()->second, p->m_playback_frame_seq_find);
-			return -2;
-		}
-		else {
-			int64_t	frame_offset = p->m_frame_offset_map[p->m_playback_frame_seq_find][0];//The frame was lost!!!
-			int64_t	data_len = p->m_frame_offset_map[p->m_playback_frame_seq_find][1];//The frame was lost!!!
-			if (frame_offset < 0) {//this frame is lost!!!
-				return 0;
-			}
-			//fprintf(stdout, "%s frame_no:%lld, frame_offset:%lld\n", __FUNCTION__,frame_no, frame_offset);
-			LARGE_INTEGER offset;
-			offset.QuadPart = frame_offset;
-			SetFilePointerEx(p->m_fp_reader, offset, NULL, FILE_BEGIN);
-			int nBytesRead = fread(buffer, 1, data_len, p->m_fp_reader);
-			if (data_len == nBytesRead) {
-				fprintf(stdout, "fread failed, !!!\n");
-			}
-			--p->m_playback_frame_seq_find;
-		}
+	if (-1 == RingBuffer_read((RingBuffer*)p->m_ring_buffer_for_decoder, p->m_read_buffer_for_decoder, p->m_read_buffer_for_decoder_len)) {
+		return 0;
 	}
+
+	int64_t frame_len = 0;
+	int64_t	seq = 0;
+
+	memcpy(&seq, &p->m_read_buffer_for_decoder[FRAME_SEQ_START], sizeof frame_len);
+	memcpy(&frame_len, &p->m_read_buffer_for_decoder[H264_FRAME_DATA_LENGTH_START], sizeof frame_len);
+	memcpy(buffer, &p->m_read_buffer_for_decoder[H264_FRAME_DATA_START], frame_len);
+
+	p->m_last_decode_seq = seq;
+
+	return frame_len;
 }
 
-int32_t decoder_write_next_frame(unsigned char* buffer, int32_t len, void* ctx) {
+FILE*	g_fp_yuv422 = NULL;
+
+int32_t decoder_write_next_frame(int8_t* buffer, int32_t len, void* ctx) {
 	CPlaybackCtrlSdi* p = (CPlaybackCtrlSdi*)ctx;
+	int64_t timestamp = get_current_time_in_ms();
+
+	if (p->m_resized_flag) {
+		if (NULL == p->m_resized_yuy2_buffer) {
+			p->m_resized_yuy2_buffer_len = p->m_play_frame_w* p->m_play_frame_h * 2 + FRAME_DATA_START;//FIXME:
+			p->m_resized_yuy2_buffer = new char[p->m_resized_yuy2_buffer_len];
+		}
+
+		if (NULL == p->m_scale_ctx_for_resized)
+			p->m_scale_ctx_for_resized = sws_getContext(p->m_image_w, p->m_image_h, AV_PIX_FMT_YUV420P, p->m_play_frame_w, p->m_play_frame_h, AV_PIX_FMT_YUYV422, SWS_BILINEAR, 0, 0, 0);
+
+	
+		//AVFrame yuv_frame, resized_yuv_frame;
+		av_image_fill_arrays( ((AVFrame*)p->m_yuv_frame_in)->data, ((AVFrame*)p->m_yuv_frame_in)->linesize, (const uint8_t*)buffer, AV_PIX_FMT_YUV420P, p->m_image_w, p->m_image_h, 16);
+		av_image_fill_arrays(((AVFrame*)p->m_resized_yuv_frame)->data, ((AVFrame*)p->m_resized_yuv_frame)->linesize, (const uint8_t*)(&p->m_resized_yuy2_buffer[FRAME_DATA_START]), AV_PIX_FMT_YUYV422, p->m_play_frame_w, p->m_play_frame_h, 16);
+
+		int ret = sws_scale((SwsContext*)p->m_scale_ctx_for_resized, ((AVFrame*)p->m_yuv_frame_in)->data, ((AVFrame*)p->m_yuv_frame_in)->linesize, 0, p->m_image_h, ((AVFrame*)p->m_resized_yuv_frame)->data, ((AVFrame*)p->m_resized_yuv_frame)->linesize);
+		if (ret != p->m_play_frame_h) {
+			fprintf(stderr, "%s sws_scale failed!\n", __FUNCTION__);
+		}
+
+		memcpy(&p->m_resized_yuy2_buffer[FRAME_TIMESTAMP_START], &timestamp, sizeof timestamp);
+		memcpy(&p->m_resized_yuy2_buffer[FRAME_SEQ_START], &p->m_last_decode_seq, sizeof p->m_last_decode_seq);
+
+		if (p->m_cb_have_data) {
+			//if (g_fp_yuv422 == NULL) {
+			//	g_fp_yuv422 = fopen("1.yuv422", "wb");
+			//}
+			//if (g_fp_yuv422)
+			//	fwrite(p->m_resized_yuv_buffer+16, 1, p->m_resized_yuv_buffer_len-16, g_fp_yuv422);
+
+			p->m_cb_have_data((unsigned char*)p->m_resized_yuy2_buffer, p->m_resized_yuy2_buffer_len, p->m_cb_have_data_ctx);
+		}
+		return p->m_resized_yuy2_buffer_len;
+	}
+
+	//AVFrame yuv422_frame, yuv420_frame;
+	av_image_fill_arrays(((AVFrame*)p->m_yuv420_frame)->data, ((AVFrame*)p->m_yuv420_frame)->linesize, (const uint8_t*)buffer, AV_PIX_FMT_YUV420P, p->m_image_w, p->m_image_h, 16);
+	av_image_fill_arrays(((AVFrame*)p->m_output_yuy2_frame)->data, ((AVFrame*)p->m_output_yuy2_frame)->linesize, (const uint8_t*)(&p->m_out_yuy2_buffer[FRAME_DATA_START]), AV_PIX_FMT_YUYV422, p->m_image_w, p->m_image_h, 16);
+
+	int ret = sws_scale((SwsContext*)p->m_scale_ctx_yuv420p_to_yuy2, ((AVFrame*)p->m_yuv420_frame)->data, ((AVFrame*)p->m_yuv420_frame)->linesize, 0, p->m_image_h, ((AVFrame*)p->m_output_yuy2_frame)->data, ((AVFrame*)p->m_output_yuy2_frame)->linesize);
+	if (ret != p->m_image_h) {
+		fprintf(stderr, "yuv422 to yuv420p falied ret %d\n", ret);
+		return 0;
+	}
+
+	memcpy(&p->m_out_yuy2_buffer[FRAME_TIMESTAMP_START], &timestamp, sizeof timestamp);
+	memcpy(&p->m_out_yuy2_buffer[FRAME_SEQ_START], &p->m_last_decode_seq, sizeof p->m_last_decode_seq);
 
 	if (p->m_cb_have_data) {
-		p->m_cb_have_data((unsigned char*)buffer, len, p->m_cb_have_data_ctx);
+		p->m_cb_have_data((unsigned char*)(p->m_out_yuy2_buffer), p->m_out_yuy2_buffer_len, p->m_cb_have_data_ctx);
 	}
-	return len;
+	return p->m_out_yuy2_buffer_len;
 }
-
-
-
 
 CPlaybackCtrlSdi::CPlaybackCtrlSdi() :m_store_file_flag(false), m_status(Pb_STATUS_NONE), m_last_status(Pb_STATUS_NONE), m_image_w(MAX_IMAGE_WIDTH), \
-m_image_h(MAX_IMAGE_HEIGHT), m_frame_counter(0), m_playback_frame_seq_find(0), m_cb_have_data(NULL), m_cb_have_data_ctx(NULL), m_last_live_play_seq(0), m_play_frame_gap(0), m_live_frame_flag(false) {
+m_image_h(MAX_IMAGE_HEIGHT), m_frame_counter(0), m_playback_frame_seq_find(0), m_cb_have_data(NULL), m_cb_have_data_ctx(NULL), m_last_live_play_seq(0), m_play_frame_gap(0), \
+m_live_frame_flag(false), m_scale_ctx_for_resized(NULL), m_resized_yuy2_buffer(NULL), m_resized_yuy2_buffer_len(0),m_yuv420p_buffer(NULL), m_uyvy422_buffer(NULL), m_scale_ctx_uyvy422_to_yuv420p(NULL),\
+m_ring_buffer_for_yuv(NULL),m_fp_reader(NULL),m_fp_writter(NULL), m_scale_ctx_yuv420p_to_yuy2(NULL){
+
+	m_bytes_written = 0;
+	m_has_reach_max_file_size = false;
+
 	m_decklink_input_obj = new CDeckLinkInputDevice;
-	m_encoder_thread = new CEncodeThread;
-	//m_ring_buffer_for_yuv = RingBuffer_create(GET_IMAGE_BUFFER_SIZE(m_image_w, m_image_h));
+	m_ffmpeg_encoder = new CFFmpegH264Encoder;
+	m_ffmpeg_decoder = new CFFmpegH264Decoder;
+	m_grab_fps_counter = new CFPSCounter;
+	m_write_file_fps_counter = new CFPSCounter;
+
+	m_image_w = m_play_frame_w = MAX_IMAGE_WIDTH;
+	m_image_h = m_play_frame_h = MAX_IMAGE_HEIGHT;
 }
 CPlaybackCtrlSdi::~CPlaybackCtrlSdi() {
-	delete m_encoder_thread;
+	delete m_ffmpeg_encoder;
+	delete m_ffmpeg_decoder;
 	delete m_decklink_input_obj;
+
+	delete m_grab_fps_counter;
+	delete m_write_file_fps_counter;
+
 }
 
-bool CPlaybackCtrlSdi::start(int sdi_index) {
+bool CPlaybackCtrlSdi::start(int type, int sdi_index) {
 
-	std::string parameter("-g ");//("-g 1920x1080 -b 30000 -f 30/1 -gop 1")
-	parameter.append(std::to_string(m_image_w) + "x" + std::to_string(m_image_h));
-	parameter.append(" -b 30000 -f ");
-	parameter.append(std::to_string(MAX_FPS) + "/1 -gop 1");
+	m_type = type;
 
-	((CEncodeThread*)m_encoder_thread)->init(parameter.c_str());
-	((CEncodeThread*)m_encoder_thread)->start(std::bind(&encoder_read_next_frame, std::placeholders::_1, std::placeholders::_2, this), std::bind(&encoder_write_next_frame, std::placeholders::_1, std::placeholders::_2, this));
+	m_ring_buffer_for_yuv = RingBuffer_create(GET_IMAGE_BUFFER_SIZE(m_image_w, m_image_h) * MAX_FPS);
+
+	m_yuv420p_buffer_len = m_image_w * m_image_h * 3 / 2;
+	m_yuv420p_buffer = new char[m_yuv420p_buffer_len];
+
+	m_out_yuy2_buffer_len = m_image_w * m_image_h * 2 + FRAME_DATA_START;
+	m_out_yuy2_buffer = new char[m_out_yuy2_buffer_len];
+
+	m_uyvy422_buffer_len = m_image_w * m_image_h * 2;
+	m_uyvy422_buffer = new char[m_uyvy422_buffer_len];
+	
+	m_yuv422_frame = av_frame_alloc();
+	m_yuv420_frame = av_frame_alloc();
+
+	m_yuv_frame_in = av_frame_alloc();
+	m_resized_yuv_frame = av_frame_alloc();
+	m_yuv_frame_out = av_frame_alloc();
+	m_output_yuy2_frame = av_frame_alloc();
+
+	m_scale_ctx_uyvy422_to_yuv420p = sws_getContext(m_image_w, m_image_h, AV_PIX_FMT_UYVY422, m_image_w, m_image_h, AV_PIX_FMT_YUV420P, SWS_BILINEAR, 0, 0, 0);
+
+	m_scale_ctx_yuv420p_to_yuy2 = sws_getContext(m_image_w, m_image_h, AV_PIX_FMT_YUV420P, m_image_w, m_image_h, AV_PIX_FMT_YUYV422, SWS_BILINEAR, 0, 0, 0);
+
+	m_scale_ctx_uyvy422_to_yuy2 = sws_getContext(m_image_w, m_image_h, AV_PIX_FMT_UYVY422, m_image_w, m_image_h, AV_PIX_FMT_YUYV422, SWS_BILINEAR, 0, 0, 0);
+
+	if (type == 1) {//cctv.com
+		m_io_buffer_len = H264_FRAME_SIZE;
+		m_io_buffer = new char[m_io_buffer_len];
+
+		m_read_buffer_for_ctrl_len = H264_FRAME_SIZE;
+		m_read_buffer_for_ctrl = new char[m_read_buffer_for_ctrl_len];
+		m_ring_buffer_for_ctrl = RingBuffer_create(H264_FRAME_SIZE * 2);
+
+		m_read_buffer_for_decoder_len = H264_FRAME_SIZE;
+		m_read_buffer_for_decoder = new char[m_read_buffer_for_decoder_len];
+		m_ring_buffer_for_decoder = RingBuffer_create(H264_FRAME_SIZE * 2);
+
+		((CFFmpegH264Decoder*)m_ffmpeg_decoder)->init(m_image_w, m_image_h, std::bind(&decoder_read_next_frame, std::placeholders::_1, std::placeholders::_2, this), std::bind(&decoder_write_next_frame, std::placeholders::_1, std::placeholders::_2, this));
+		((CFFmpegH264Decoder*)m_ffmpeg_decoder)->start();
+
+		((CFFmpegH264Encoder*)m_ffmpeg_encoder)->init(m_image_w, m_image_h, std::bind(&encoder_read_next_frame, std::placeholders::_1, std::placeholders::_2, this), std::bind(&encoder_write_next_frame, std::placeholders::_1, std::placeholders::_2, this));
+		((CFFmpegH264Encoder*)m_ffmpeg_encoder)->start();
+
+		CMyThread::start();
+	}
 
 	if (false == ((CDeckLinkInputDevice*)m_decklink_input_obj)->CreateObjects(sdi_index)) {
 		return false;
 	}
+	
+	((CDeckLinkInputDevice*)m_decklink_input_obj)->setSinkDataCallback(decklink_device_sink_cb, this);
+
 	if (false == ((CDeckLinkInputDevice*)m_decklink_input_obj)->start_capture()) {
 		return false;
 	}
@@ -158,14 +350,108 @@ bool CPlaybackCtrlSdi::start(int sdi_index) {
 
 bool CPlaybackCtrlSdi::stop() {
 
+	CMyThread::stop();
+
 	if (false == ((CDeckLinkInputDevice*)m_decklink_input_obj)->stop_capture()) {
 		return false;
 	}
 
 	((CDeckLinkInputDevice*)m_decklink_input_obj)->DestroyObjects();
-	((CEncodeThread*)m_encoder_thread)->stop();
+
+	if (m_ffmpeg_encoder) {
+		((CFFmpegH264Encoder*)m_ffmpeg_encoder)->stop();
+	}
+	if (m_ffmpeg_decoder) {
+		((CFFmpegH264Decoder*)m_ffmpeg_decoder)->stop();
+	}
+	
+	if (m_ring_buffer_for_decoder) {
+		RingBuffer_destroy((RingBuffer*)m_ring_buffer_for_decoder);
+	}
+	if (m_ring_buffer_for_ctrl)
+		RingBuffer_destroy((RingBuffer*)m_ring_buffer_for_ctrl);
+
+	if (m_io_buffer) {
+		delete[] m_io_buffer;
+		m_io_buffer = NULL;
+	}
+
+	if (m_read_buffer_for_decoder) {
+		delete[] m_read_buffer_for_decoder;
+		m_read_buffer_for_decoder = NULL;
+	}
+
+	if (m_read_buffer_for_ctrl) {
+		delete[] m_read_buffer_for_ctrl;
+		m_read_buffer_for_ctrl = NULL;
+	}
+
+	if (m_ring_buffer_for_yuv)
+		RingBuffer_destroy((RingBuffer*)m_ring_buffer_for_yuv);
+
+	if (m_yuv420p_buffer) {
+		delete[] m_yuv420p_buffer;
+		m_yuv420p_buffer = NULL;
+	}
+
+	if (m_uyvy422_buffer) {
+		delete[] m_uyvy422_buffer;
+		m_uyvy422_buffer = NULL;
+	}
+
+	if (m_out_yuy2_buffer) {
+		delete[] m_out_yuy2_buffer;
+		m_out_yuy2_buffer = NULL;
+	}
+
+	if (m_resized_yuy2_buffer) {
+		delete[] m_resized_yuy2_buffer;
+		m_resized_yuy2_buffer = NULL;
+	}
+
+	if (m_scale_ctx_for_resized) {
+		sws_freeContext((SwsContext*)m_scale_ctx_for_resized);
+		m_scale_ctx_for_resized = NULL;
+	}
+	
+	if (m_scale_ctx_uyvy422_to_yuv420p) {
+		sws_freeContext((SwsContext*)m_scale_ctx_uyvy422_to_yuv420p);
+		m_scale_ctx_uyvy422_to_yuv420p = NULL;
+	}
+
+	if (m_scale_ctx_yuv420p_to_yuy2) {
+		sws_freeContext((SwsContext*)m_scale_ctx_yuv420p_to_yuy2);
+		m_scale_ctx_yuv420p_to_yuy2 = NULL;
+	}
+
+	if (m_scale_ctx_uyvy422_to_yuy2) {
+		sws_freeContext((SwsContext*)m_scale_ctx_uyvy422_to_yuy2);
+		m_scale_ctx_uyvy422_to_yuy2 = NULL;
+	}
+
+	if (m_yuv420_frame)
+		av_frame_free((AVFrame**)(&m_yuv420_frame));
+
+	if (m_yuv422_frame)
+		av_frame_free((AVFrame**)(&m_yuv422_frame));
+
+	if (m_yuv_frame_in)
+		av_frame_free((AVFrame**)(&m_yuv_frame_in));
+
+	if (m_resized_yuv_frame)
+		av_frame_free((AVFrame**)(&m_resized_yuv_frame));
+
+	if (m_fp_reader)
+		fclose(m_fp_reader);
+
+	if (m_fp_writter)
+		fclose(m_fp_writter);
 
 	return true;
+}
+
+void	CPlaybackCtrlSdi::set_format_changed(on_format_changed_cb _cb, void* context) {
+	((CDeckLinkInputDevice*)m_decklink_input_obj)->setVideoInputFormatChangedCallback(_cb, context);
 }
 
 void CPlaybackCtrlSdi::set_cb_have_data(on_have_data_cb cb, void* context) {
@@ -181,31 +467,67 @@ int32_t	CPlaybackCtrlSdi::set_play_frame_resolution(const int32_t width, const i
 	m_play_frame_w = width;
 	m_play_frame_h = height;
 
+
+	m_resized_flag = (m_image_w != m_play_frame_w || m_image_h != m_play_frame_h);
+
+	if (Pb_STATUS_PAUSE == m_status) {//find an image when in Pb_STATUS_PAUSE
+		std::vector<char> buffer(GET_IMAGE_BUFFER_SIZE(m_image_w, m_image_h), 0x00);
+		int64_t find_seq = m_last_decode_seq - m_play_frame_gap;
+
+		if (m_frame_offset_map.find(find_seq) == m_frame_offset_map.end()) {//The frame was overwritten!!!
+																							 //fprintf(stderr, "Frame %lld was not found!!!\n", frame_no);
+			fprintf(stdout, "%s %d map size(%lld),beg(seq:%lld,offset:%lld),end(seq:%lld,offset:%lld),Frame %lld was not found\n", __FUNCTION__, \
+				m_status, m_frame_offset_map.size(), m_frame_offset_map.begin()->first, m_frame_offset_map.begin()->second,
+				m_frame_offset_map.rbegin()->first, m_frame_offset_map.rbegin()->second, m_playback_frame_seq_find);
+			m_status = Pb_STATUS_PAUSE;
+		}
+		else {
+			int64_t	frame_offset = m_frame_offset_map[m_playback_frame_seq_find];//The frame was lost!!!
+			if (frame_offset < 0) {//this frame is lost!!!
+				fprintf(stderr, "%s %d m_playback_frame_seq_find offset is %lld\n", __FUNCTION__, m_status, frame_offset);
+				return -1;
+			}
+			//fprintf(stdout, "%s frame_no:%lld, frame_offset:%lld\n", __FUNCTION__,frame_no, frame_offset);
+			_fseeki64(m_fp_reader, frame_offset, SEEK_SET);
+			int nBytesRead = fread(m_read_buffer_for_ctrl, 1, m_read_buffer_for_ctrl_len, m_fp_reader);
+			if (m_read_buffer_for_ctrl_len == nBytesRead) {
+				fprintf(stderr, "fread failed, !!!\n");
+			}
+
+			if (-1 == RingBuffer_write((RingBuffer*)m_ring_buffer_for_decoder, m_read_buffer_for_ctrl, m_read_buffer_for_ctrl_len)) {
+				fprintf(stderr, "%s m_ring_buffer_for_decoder is full!\n", __FUNCTION__);
+				return -2;
+			}
+		}
+	}
+
 	return 1;
 }
 int32_t CPlaybackCtrlSdi::set_play_frame_rate(const int32_t play_frame_rate, const int32_t sample_gap) {
-	if (play_frame_rate == m_play_frame_rate && sample_gap == m_sample_gap) {
+	if (play_frame_rate == m_play_frame_rate && sample_gap == m_play_frame_gap) {
 		return 0;
 	}
 	m_play_frame_rate = play_frame_rate;
-	m_sample_gap = sample_gap;
+	m_play_frame_gap = sample_gap;
 	return 1;
 }
 int32_t CPlaybackCtrlSdi::set_store_file(const int32_t flag, char* file_name) {
+	//if (m_type != 1)
+	//	return 0;
 	if (file_name != NULL) {
 		if (m_fp_writter == NULL) {
 			m_fp_writter = fopen(file_name, "wb");
 		}
 		if (m_fp_writter == NULL){
-			fprintf(stdout, "%s fopen %s failed!\n", __FUNCTION__, file_name);
+			fprintf(stdout, "%s m_fp_writter fopen %s failed!\n", __FUNCTION__, file_name);
 			return -1;
 		}
 
 		if (m_fp_reader == NULL) {
-			m_fp_reader = fopen(file_name, "wb");
+			m_fp_reader = fopen(file_name, "rb");
 		}
 		if (m_fp_reader == NULL) {
-			fprintf(stdout, "%s fopen %s failed!\n", __FUNCTION__, file_name);
+			fprintf(stdout, "%s m_fp_reader fopen %s failed!\n", __FUNCTION__, file_name);
 			return -1;
 		}
 	}
@@ -219,31 +541,59 @@ int CPlaybackCtrlSdi::exchanged_status(CPlaybackCtrlSdi::Playback_Status next) {
 }
 
 int32_t CPlaybackCtrlSdi::play_live(const int32_t play_frame_rate, const int32_t sample_gap) {
+	m_play_frame_gap = sample_gap;
+	m_play_frame_rate = play_frame_rate;
+	m_live_frame_flag = true;
+	m_last_live_play_seq = m_frame_counter;
 	return exchanged_status(Pb_STATUS_LIVE);
 }
 int32_t CPlaybackCtrlSdi::play_forward(const int32_t play_frame_rate, const int32_t sample_gap) {
+	if (m_type != 1)
+		return 0;
+	m_play_frame_gap = sample_gap;
+	m_play_frame_rate = play_frame_rate;
 	return exchanged_status(Pb_STATUS_FORWARD);
 }
 int32_t CPlaybackCtrlSdi::play_backward(const int32_t play_frame_rate, const int32_t sample_gap) {
+	if (m_type != 1)
+		return 0;
+	m_play_frame_gap = sample_gap;
+	m_play_frame_rate = play_frame_rate;
+	m_playback_frame_seq_find = m_last_decode_seq;
 	return exchanged_status(Pb_STATUS_BACKWARD);
 }
 int32_t CPlaybackCtrlSdi::play_pause() {
 	return exchanged_status(Pb_STATUS_PAUSE);
 }
 int32_t	CPlaybackCtrlSdi::play_from_a2b(const int64_t a, const int64_t b) {
+	if (m_type != 1)
+		return 0;
+	m_from_a2b_index = m_from_a2b_from = a;
+	m_from_a2b_to = b;
+	m_toward_2b = true;
 	return exchanged_status(Pb_STATUS_FROM_A2B_LOOP);
 }
 
 double  CPlaybackCtrlSdi::get_grab_fps() {
-	return .0;
+	return ((CFPSCounter*)m_grab_fps_counter)->GetFPS();
 }
 double  CPlaybackCtrlSdi::get_write_file_fps() {
-	return .0;
+	return ((CFPSCounter*)m_write_file_fps_counter)->GetFPS();
 }
 
+void CPlaybackCtrlSdi::calc_play_frame_no(int gap) {
+	if (Pb_STATUS_FORWARD == m_status) {
+		m_playback_frame_seq_find += gap;
+	}
+	else {
+		m_playback_frame_seq_find -= gap;
+	}
+}
 
 void CPlaybackCtrlSdi::run() {
 	timeBeginPeriod(1);
+
+	
 
 	while (true) {
 		int64_t	now = get_current_time_in_ms();
@@ -253,39 +603,198 @@ void CPlaybackCtrlSdi::run() {
 		if (Pb_STATUS_NONE == m_status || Pb_STATUS_PAUSE == m_status) {
 			sleep(1);
 			continue;
+		}else if (CPlaybackCtrlSdi::Pb_STATUS_LIVE == m_status) {
+			if (-1 == RingBuffer_read((RingBuffer*)m_ring_buffer_for_ctrl, m_read_buffer_for_ctrl, m_read_buffer_for_ctrl_len)) {
+				//fprintf(stderr, "%s %d m_ring_buffer_for_ctrl is empty!\n", __FUNCTION__, m_status);
+				sleep(1);
+				continue;
+			}
+			if (-1 == RingBuffer_write((RingBuffer*)m_ring_buffer_for_decoder, m_read_buffer_for_ctrl, m_read_buffer_for_ctrl_len)) {
+				//fprintf(stderr, "%s %d m_ring_buffer_for_decoder is full!\n", __FUNCTION__, m_status);
+				sleep(1);
+				continue;
+			}
 		}
 		else if (Pb_STATUS_FORWARD == m_status || Pb_STATUS_BACKWARD == m_status) {
-			
+			fprintf(stdout, "%s status %d find_seq %d\n", __FUNCTION__, m_status, m_playback_frame_seq_find);
+			if (m_frame_offset_map.find( m_playback_frame_seq_find) ==  m_frame_offset_map.end()) {//The frame was overwritten!!!
+				//fprintf(stderr, "Frame %lld was not found!!!\n", frame_no);
+				if (m_frame_offset_map.size() > 0) {
+					fprintf(stdout, "%s %d map size(%lld),beg(seq:%lld,offset:%lld),end(seq:%lld,offset:%lld),Frame %lld was not found\n", __FUNCTION__, \
+						m_status, m_frame_offset_map.size(), m_frame_offset_map.begin()->first, m_frame_offset_map.begin()->second,
+						m_frame_offset_map.rbegin()->first, m_frame_offset_map.rbegin()->second, m_playback_frame_seq_find);
+				}
+				else {
+					fprintf(stdout, "m_frame_offset_map is empty(%d)!\n", m_frame_offset_map.size());
+				}
+
+				m_status = Pb_STATUS_PAUSE;
+			}
+			else {
+				int64_t	frame_offset = m_frame_offset_map[m_playback_frame_seq_find];//The frame was lost!!!
+				if (frame_offset < 0) {//this frame is lost!!!
+					//fprintf(stderr, "%s %d m_playback_frame_seq_find offset is %lld\n",__FUNCTION__, m_status, frame_offset);
+					calc_play_frame_no(1);
+					sleep(1);
+					continue;
+				}
+				//fprintf(stdout, "%s frame_no:%lld, frame_offset:%lld\n", __FUNCTION__,frame_no, frame_offset);
+				_fseeki64(m_fp_reader, frame_offset, SEEK_SET);
+				int nBytesRead = fread(m_read_buffer_for_ctrl, 1, m_read_buffer_for_ctrl_len, m_fp_reader);
+				if (m_read_buffer_for_ctrl_len != nBytesRead) {
+					//fprintf(stderr, "fread failed, !!!\n");
+					exchanged_status(Pb_STATUS_PAUSE);
+					continue;
+				}
+
+				if (-1 == RingBuffer_write((RingBuffer*)m_ring_buffer_for_decoder, m_read_buffer_for_ctrl, m_read_buffer_for_ctrl_len)) {
+					//fprintf(stderr, "%s m_ring_buffer_for_decoder is full!\n", __FUNCTION__);
+					sleep(1);
+				}
+				calc_play_frame_no(m_play_frame_gap);
+
+				int64_t	now2 = get_current_time_in_ms();
+				double t = 1000.0f / ((double)m_play_frame_rate + 2.0f);
+				if (now2 - now < t) {
+					//fprintf(stdout, " sleep:%f", t - (double)(now2 - now));
+					sleep(t - (double)(now2 - now));
+				}
+			}
 		}
 		else if (Pb_STATUS_FROM_A2B_LOOP == m_status) {
+			if (m_frame_offset_map.find(m_from_a2b_index) == m_frame_offset_map.end()) {//The frame was overwritten!!!
+																								 //fprintf(stderr, "Frame %lld was not found!!!\n", frame_no);
+				fprintf(stderr, "%s %d m_from_a2b_index can not be found\n", __FUNCTION__, m_status);
+				if (m_toward_2b) {
+					m_from_a2b_index += m_play_frame_gap;
+				}
+				else {
+					m_status = Pb_STATUS_PAUSE;
+					fprintf(stdout, "%s 1 m_status %d  m_from_a2b_index %d\n", __FUNCTION__, m_status, m_from_a2b_index);
+				}
 
+				if (m_from_a2b_index >= m_from_a2b_to) {
+					m_from_a2b_index -= (m_play_frame_gap * 2);
+					m_toward_2b = !m_toward_2b;
+				}
+				else if (m_from_a2b_from <= m_from_a2b_from) {
+					m_from_a2b_index += (m_play_frame_gap * 2);
+					m_toward_2b = !m_toward_2b;
+				}
+				continue;
+			}
+			else {
+				int64_t	frame_offset = m_frame_offset_map[m_from_a2b_index];//The frame was lost!!!
+				if (frame_offset < 0) {//this frame is lost!!! frame_offset shoule be -1!!!
+					if (m_toward_2b) {
+						m_from_a2b_index += 1;
+					}
+					else {
+						m_from_a2b_index -= 1;
+					}
+
+					if (m_from_a2b_index >= m_from_a2b_to) {
+						m_from_a2b_index -= (1 * 2);
+						m_toward_2b = !m_toward_2b;
+					}
+					else if (m_from_a2b_index <= m_from_a2b_from) {
+						m_from_a2b_index += (1 * 2);
+						m_toward_2b = !m_toward_2b;
+					}
+					fprintf(stdout, "%s 2 m_status %d  m_from_a2b_index %d m_toward_2b %d\n", __FUNCTION__, m_status, m_from_a2b_index, m_toward_2b);
+					continue;
+				}
+				else {
+					//fprintf(stdout, "%s frame_no:%lld, frame_offset:%lld\n", __FUNCTION__,frame_no, frame_offset);
+					_fseeki64(m_fp_reader, frame_offset, SEEK_SET);
+					int nBytesRead = fread(m_read_buffer_for_ctrl, 1, m_read_buffer_for_ctrl_len, m_fp_reader);
+					if (m_read_buffer_for_ctrl_len != nBytesRead) {
+						fprintf(stdout, "fread failed, !!!\n");
+					}
+
+					if (-1 == RingBuffer_write((RingBuffer*)m_ring_buffer_for_decoder, m_read_buffer_for_ctrl, m_read_buffer_for_ctrl_len)) {
+						fprintf(stderr, "%s m_ring_buffer_for_decoder is full!\n", __FUNCTION__);
+						sleep(1);
+					}
+					
+					if (m_toward_2b) {
+						m_from_a2b_index += m_play_frame_gap;
+					}
+					else {
+						m_from_a2b_index -= m_play_frame_gap;
+					}
+
+					if (m_from_a2b_index >= m_from_a2b_to) {
+						m_from_a2b_index -= (m_play_frame_gap * 2);
+						m_toward_2b = !m_toward_2b;
+					}
+					else if (m_from_a2b_index <= m_from_a2b_from) {
+						m_from_a2b_index += (m_play_frame_gap * 2);
+						m_toward_2b = !m_toward_2b;
+					}
+
+					int64_t	now2 = get_current_time_in_ms();
+					double t = 1000.0f / ((double)m_play_frame_rate + 2.0f);
+					if (now2 - now < t) {
+						//fprintf(stdout, " sleep:%f", t - (double)(now2 - now));
+						sleep(t - (double)(now2 - now));
+					}
+				}
+			}
 		}
 	
-		int64_t	now2 = get_current_time_in_ms();
-		double t = 1000.0f / ((double)m_play_frame_rate + 2.0f);
-		if (now2 - now < t) {
-			//fprintf(stdout, " sleep:%f", t - (double)(now2 - now));
-			sleep(t - (double)(now2 - now));
-		}
+	
 	}
 	timeEndPeriod(1);
+
+
 }
 
 int32_t	CPlaybackCtrlSdi::write_yuv_data(char* buffer, int len) {
 	int ret = RingBuffer_write((RingBuffer*)m_ring_buffer_for_yuv, buffer, len);
 	if (-1 == ret) {
-		fprintf(stderr, "%s m_ring_buffer_for_yuv is full!!!\n", __FUNCTION__);
+		//fprintf(stderr, "%s m_ring_buffer_for_yuv is full!!!\n", __FUNCTION__);
 	}
 	return ret;
 }
 
 int32_t	CPlaybackCtrlSdi::read_yuv_data(char* buffer, int len) {
+
+	//check yuv data!!!
 	int ret = RingBuffer_read((RingBuffer*)m_ring_buffer_for_yuv, buffer, len);
 	if (-1 == ret) {
-		fprintf(stderr, "%s m_ring_buffer_for_yuv is empty!!!\n", __FUNCTION__);
+		//fprintf(stderr, "%s m_ring_buffer_for_yuv is empty!!!\n", __FUNCTION__);
 	}
 	return ret;
 }
 
-#endif
+double  CPlaybackCtrlSdi::get_full_frame_rate() {
+	return m_full_frame_rate;
+}
 
+
+int32_t	CPlaybackCtrlSdi::scale_image(char* src_yuv, int src_len, int src_w, int src_h,int src_fmt, char* dst_yuv, int dst_len, int dst_w, int dst_h, int dst_fmt) {
+
+		void*	sws_context = NULL;
+		void*	src_yuv_frame = NULL;
+		void*	dst_yuv_frame = NULL;
+
+		sws_context = sws_getContext(src_w, src_h, AVPixelFormat(src_fmt), dst_w, dst_h, AVPixelFormat(dst_fmt), SWS_BILINEAR, 0, 0, 0);
+		src_yuv_frame = av_frame_alloc();
+		dst_yuv_frame = av_frame_alloc();
+
+		av_image_fill_arrays(((AVFrame*)src_yuv_frame)->data, ((AVFrame*)src_yuv_frame)->linesize, (const uint8_t*)src_yuv, AVPixelFormat(src_fmt), src_w, src_h, 16);
+		av_image_fill_arrays(((AVFrame*)dst_yuv_frame)->data, ((AVFrame*)dst_yuv_frame)->linesize, (const uint8_t*)dst_yuv, AVPixelFormat(dst_fmt),dst_w, dst_h, 16);
+		int ret = sws_scale((SwsContext*)sws_context, ((AVFrame*)src_yuv_frame)->data, ((AVFrame*)src_yuv_frame)->linesize, 0,src_h, ((AVFrame*)dst_yuv_frame)->data, ((AVFrame*)dst_yuv_frame)->linesize);
+		if (ret != dst_h) {
+			fprintf(stderr, "%s sws_scale failed!\n", __FUNCTION__);
+		}
+
+		av_frame_free((AVFrame**)&src_yuv_frame);
+		av_frame_free((AVFrame**)&dst_yuv_frame);
+
+		sws_freeContext((SwsContext*)sws_context);
+		
+		return 1;
+}
+#endif

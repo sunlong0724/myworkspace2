@@ -42,15 +42,20 @@ public:
 	SinkDataCallback			m_cb;
 	void*						m_cb_ctx;
 
-	PixelFormatChangedCallback	m_pixle_format_changed_cb;
+	FormatChangedCallback	m_pixle_format_changed_cb;
 	void*						m_pixle_format_changed_cb_ctx;
 
 	CFPSCounter					m_grab_fps;
-
+	bool						m_can_capture_flag;
     
     NotificationCallback(IDeckLinkInput *deckLinkInput)
     {
         m_deckLinkInput = deckLinkInput;
+		m_cb = NULL;
+		m_cb_ctx = NULL;
+		m_pixle_format_changed_cb = NULL;
+		m_pixle_format_changed_cb_ctx = NULL;
+		m_can_capture_flag = false;
     }
     
     ~NotificationCallback(void)
@@ -76,7 +81,7 @@ public:
     // The callback that is called when a property of the video input stream has changed.
 	HRESULT		STDMETHODCALLTYPE VideoInputFormatChanged (/* in */ BMDVideoInputFormatChangedEvents notificationEvents, /* in */ IDeckLinkDisplayMode *newDisplayMode, /* in */ BMDDetectedVideoInputFormatFlags detectedSignalFlags)
     {
-        BMDPixelFormat pixelFormat = bmdFormat10BitYUV;
+        BMDPixelFormat pixelFormat = bmdFormat8BitYUV;
         STRINGOBJ			displayModeString = NULL;
         
         // Check for video field changes
@@ -117,7 +122,7 @@ public:
             if (detectedSignalFlags == bmdDetectedVideoInputYCbCr422)
             {
                 printf("YCbCr422\n");
-                pixelFormat = bmdFormat10BitYUV;
+                pixelFormat = bmdFormat8BitYUV;
 				pixel = 1;
 
             }
@@ -141,8 +146,46 @@ public:
             STRINGFREE(displayModeString);
         }
 
+		int width;
+		int height;
+		double frame_rate;
+		{
+			switch (newDisplayMode->GetDisplayMode()) {
+				case bmdModeHD1080p25:
+					width = 1920;
+					height = 1080;
+					frame_rate = 25.f;
+					break;
+				case bmdModeHD1080p30:
+					width = 1920;
+					height = 1080;
+					frame_rate = 30.f;
+					break;
+				case bmdModeHD1080i50:
+					width = 1920;
+					height = 1080;
+					frame_rate = 25.f;
+					break;
+				case bmdModeHD1080p50:
+					width = 1920;
+					height = 1080;
+					frame_rate = 50.f;
+					break;
+				case bmdModeHD720p50:
+					width = 1280;
+					height = 720;
+					frame_rate = 50.f;
+					break;
+				case bmdModeHD720p60:
+					width = 1280;
+					height = 720;
+					frame_rate = 60.f;
+					break;
+			}
+		}
+
 		if (m_pixle_format_changed_cb) {
-			m_pixle_format_changed_cb(pixel, (char*)modeName.data(), m_pixle_format_changed_cb_ctx);
+			m_pixle_format_changed_cb(width,height,frame_rate, m_pixle_format_changed_cb_ctx);
 		}
         
         // Pause video capture
@@ -156,23 +199,24 @@ public:
 
         // Start video capture
         m_deckLinkInput->StartStreams();
+		m_can_capture_flag = true;
         return S_OK;
     }
 
 	HRESULT		STDMETHODCALLTYPE VideoInputFrameArrived (/* in */ IDeckLinkVideoInputFrame* videoFrame, /* in */ IDeckLinkAudioInputPacket* audioPacket)
     {
-
+		//fprintf(stdout, "%s\n", __FUNCTION__);
+		if (false == m_can_capture_flag)	return S_OK;
 		if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) return S_OK;
 		
-		fprintf(stderr, "image arrived, %d x %d , %d\n", videoFrame->GetWidth(), videoFrame->GetHeight(), videoFrame->GetRowBytes());
+		//fprintf(stderr, "image arrived, %d x %d , %d\n", videoFrame->GetWidth(), videoFrame->GetHeight(), videoFrame->GetRowBytes());
 		byte * pdata = NULL;
 		videoFrame->GetBytes((void**)&pdata);
 
 		if (m_cb) {
 			m_cb((char*)pdata, videoFrame->GetHeight() * videoFrame->GetRowBytes(), m_cb_ctx);
 		}
-
-		m_grab_fps.statistics(__FUNCTION__, TRUE);
+		m_grab_fps.statistics(__FUNCTION__, FALSE);
         return S_OK;
     }
 };
@@ -185,7 +229,8 @@ void CDeckLinkInputDevice::DestroyObjects() {
 
 	HRESULT						result;
 	// Disable the video input interface
-	result = ((IDeckLinkInput*)deckLinkInput)->DisableVideoInput();
+	if (deckLinkInput != NULL)
+		result = ((IDeckLinkInput*)deckLinkInput)->DisableVideoInput();
 
 	// Release the attributes interface
 	if (deckLinkAttributes != NULL)
@@ -294,7 +339,7 @@ bool CDeckLinkInputDevice::CreateObjects(int k) {
 	}
 
 	// Enable video input with a default video mode and the automatic format detection feature enabled
-	result = ((IDeckLinkInput*)deckLinkInput)->EnableVideoInput(bmdModeNTSC, bmdFormat10BitYUV, bmdVideoInputEnableFormatDetection);
+	result = ((IDeckLinkInput*)deckLinkInput)->EnableVideoInput(bmdModeNTSC, bmdFormat8BitYUV, bmdVideoInputEnableFormatDetection);
 	if (result != S_OK)
 	{
 		fprintf(stderr, "Could not enable video input - result = %08x\n", result);
@@ -313,13 +358,16 @@ void CDeckLinkInputDevice::setSinkDataCallback(SinkDataCallback cb, void* ctx) {
 	((NotificationCallback*)notificationCallback)->m_cb_ctx = ctx;
 }
 
-void CDeckLinkInputDevice::setVideoInputFormatChangedCallback(PixelFormatChangedCallback cb, void* ctx) {
+void CDeckLinkInputDevice::setVideoInputFormatChangedCallback(FormatChangedCallback cb, void* ctx) {
 	((NotificationCallback*)notificationCallback)->m_pixle_format_changed_cb = cb;
 	((NotificationCallback*)notificationCallback)->m_pixle_format_changed_cb_ctx = ctx;
 }
 
 bool CDeckLinkInputDevice::start_capture() {
 	HRESULT						result;
+	fprintf(stderr, "%s\n", __FUNCTION__);
+
+
 	// Start capture
 	result = ((IDeckLinkInput*)deckLinkInput)->StartStreams();
 	if (result != S_OK)
@@ -347,6 +395,7 @@ double CDeckLinkInputDevice::get_fps() {
 }
 
 int32_t cb_has_data(char* buffer, int32_t len, void* ctx) {
+	fprintf(stdout, "%s\n", __FUNCTION__);
 	FILE* fp = (FILE*)ctx;
 	if (fp) {
 		fwrite(buffer, len, 1, fp);
@@ -376,7 +425,7 @@ int main(int argc, char** argv) {
 
 	FILE* fp = NULL;
 	if (!fp) {
-		fopen("1.yuv", "wb");
+		fp = fopen("1.yuv", "wb");
 		if (!fp) {
 			fprintf(stderr, "%s fopen failed!\n", __FUNCTION__);
 		}

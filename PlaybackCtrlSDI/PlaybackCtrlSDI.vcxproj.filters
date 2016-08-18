@@ -33,9 +33,6 @@
     <ClCompile Include="..\platform.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="DeckLinkAPI_i.c">
-      <Filter>DeckLinkApi</Filter>
-    </ClCompile>
     <ClCompile Include="main.cc">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -48,15 +45,21 @@
     <ClCompile Include="..\std\lcthw\ringbuffer.c">
       <Filter>std\lcthw</Filter>
     </ClCompile>
+    <ClCompile Include="ffmpeg_h264enc.cc">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="SdiOutput.cc">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="DeckLinkAPI_i.c">
+      <Filter>std</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="DeckLinkIODevice.h">
       <Filter>源文件</Filter>
     </ClInclude>
     <ClInclude Include="..\platform.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="msdk_codec.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="PlaybackCtrlSdi.h">
@@ -82,6 +85,9 @@
     </ClInclude>
     <ClInclude Include="..\std\lcthw\ringbuffer.h">
       <Filter>std\lcthw</Filter>
+    </ClInclude>
+    <ClInclude Include="ffmpeg_h264enc.h">
+      <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

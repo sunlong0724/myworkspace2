@@ -49,7 +49,7 @@
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v140</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
-    <CharacterSet>Unicode</CharacterSet>
+    <CharacterSet>MultiByte</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -74,15 +74,21 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);..;..\std;.;</IncludePath>
-    <OutDir>..\output</OutDir>
-    <LibraryPath>$(OutDir);$(LibraryPath)</LibraryPath>
+    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);..;..\std;.;..\3rdParty\ffmpeg\include;..\3rdParty\opencv\include</IncludePath>
+    <OutDir>..\output\</OutDir>
+    <LibraryPath>$(OutDir);..\3rdParty\ffmpeg\lib;$(LibraryPath)</LibraryPath>
+    <IntDir>$(OutDir)\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>$(ProjectName)d</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
+    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);..;..\std;.;..\3rdParty\ffmpeg\include;..\3rdParty\opencv\include</IncludePath>
+    <OutDir>..\output\</OutDir>
+    <LibraryPath>$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64);$(NETFXKitsDir)Lib\um\x64;$(OutDir);..\3rdParty\ffmpeg\lib</LibraryPath>
+    <IntDir>$(OutDir)\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -151,8 +157,10 @@
     <ClCompile Include="DeckLinkAPI_i.c" />
     <ClCompile Include="DeckLinkInputDevice.cpp" />
     <ClCompile Include="DeckLinkOutputDevice.cpp" />
+    <ClCompile Include="ffmpeg_h264enc.cc" />
     <ClCompile Include="main.cc" />
     <ClCompile Include="PlaybackCtrlSdi.cc" />
+    <ClCompile Include="SdiOutput.cc" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\platform.h" />
@@ -164,7 +172,7 @@
     <ClInclude Include="..\std\MyThread.h" />
     <ClInclude Include="..\std\utils.h" />
     <ClInclude Include="DeckLinkIODevice.h" />
-    <ClInclude Include="msdk_codec.h" />
+    <ClInclude Include="ffmpeg_h264enc.h" />
     <ClInclude Include="PlaybackCtrlSdi.h" />
   </ItemGroup>
   <ItemGroup>
